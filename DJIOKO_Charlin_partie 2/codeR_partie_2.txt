@@ -1,0 +1,123 @@
+
+# 1 : Chargement et nettoyage de la base FD.csv
+
+# Chargement des packages utiles
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(readr)
+
+# Chargement des données
+fd <- read.csv("FD.csv")
+
+# Vérification et conversion des types
+fd$Date <- as.Date(fd$Date)
+fd <- fd %>%
+  mutate(pays = str_extract(Banque, "[A-Z]{2}"))
+fd <- fd[, !names(fd) %in% c("X")]
+# Contrôle des données
+head(fd)
+
+# 2 : Analyse descriptive par pays et par banque
+
+# Évolution agrégée par pays
+library(ggplot2)
+
+fd_pays <- fd %>%
+  group_by(Date, pays) %>%
+  summarise(FD_total = sum(FD), .groups = "drop")
+
+ggplot(fd_pays, aes(x = Date, y = FD_total, color = pays)) +
+  geom_line() +
+  labs(title = "Évolution de la facilité de dépôt par pays", y = "Montant FD (€)", x = "Date")
+
+# Évolution agrégée par pays sans l'observation atypique
+fd_pays_principaux <- fd %>%
+  group_by(Date, pays) %>%
+  summarise(FD_total = sum(FD), .groups = "drop")
+fd_pays_principaux[which.max(fd_pays_principaux$FD_total),3] = NA
+
+ggplot(fd_pays_principaux, aes(x = Date, y = FD_total, color = pays)) +
+  geom_line() +
+  labs(title = "Évolution de la facilité de dépôt par pays sans l'atypique", y = "Montant FD (€)", x = "Date")
+
+# Évolution par banque / France
+banques_fr <- fd %>%
+  filter(pays %in% c("FR"))
+
+ggplot(banques_fr, aes(x = Date, y = FD, color = Banque)) +
+  geom_line() +
+  labs(title = "Facilité de dépôt des banques de la France", y = "Montant FD (€)", x = "Date")
+
+# Évolution par banque / France sans l'observation atypique
+banques_fr <- fd %>%
+  filter(pays %in% c("FR"))
+banques_fr[which.max(banques_fr$FD),3] = NA
+
+ggplot(banques_fr, aes(x = Date, y = FD, color = Banque)) +
+  geom_line() +
+  labs(title = "Facilité de dépôt des banques de la France", y = "Montant FD (€)", x = "Date")
+
+# Évolution par banque : DE
+banques_fr <- fd %>%
+  filter(pays %in% c("DE"))
+
+ggplot(banques_fr, aes(x = Date, y = FD, color = Banque)) +
+  geom_line() +
+  labs(title = "Facilité de dépôt des banques de l'Allemagne", y = "Montant FD (€)", x = "Date")
+
+# 3 : Intégration des taux BCE pour calcul de la rémunération
+
+# Créer le tableau brut (extrait des taux du site de la BCE)
+taux_bce <- tribble(
+  ~DateEffet, ~tauxBCE,
+  "2019-09-18", -0.50,
+  "2022-07-27", 0.00,
+  "2022-09-14", 0.75,
+  "2022-11-02", 1.50,
+  "2022-12-21", 2.00,
+  "2023-02-08", 2.50,
+  "2023-03-22", 3.00,
+  "2023-05-10", 3.25,
+  "2023-06-21", 3.50,
+  "2023-08-02", 3.75,
+  "2023-09-20", 4.00,
+  "2024-06-12", 3.75,
+  "2024-09-18", 3.50,
+  "2024-10-23", 3.25,
+  "2024-12-18", 3.00,
+  "2025-02-05", 2.75,
+  "2025-03-12", 2.50,
+  "2025-04-23", 2.25
+) %>%
+  mutate(DateEffet = as.Date(DateEffet))
+taux_bce = as.data.frame(taux_bce)
+
+# Étendre les taux pour chaque date de FD.csv
+fd_dates <- data.frame(Date = seq(min(fd$Date), Sys.Date(), by = "day"))
+
+# Ajouter les taux pour chaque jour via un left join avec remplissage vers l’avant
+taux_journalier <- fd_dates %>%
+  left_join(taux_bce, by = join_by(Date >= DateEffet)) %>%
+  group_by(Date) %>%
+  slice_tail(n = 1) %>%
+  ungroup()
+head(taux_journalier)
+
+fd <- fd %>%
+  left_join(taux_journalier, by = "Date") %>%
+  mutate(Remuneration_FD = FD * (tauxBCE / 100) / 365)
+head(fd)
+
+# 4 : Analyse spécifique des banques françaises
+fd_fr <- fd %>% filter(pays == "FR")
+fd_fr[which.max(fd_fr$Remuneration_FD),4] = NA
+ggplot(fd_fr, aes(x = Date, y = Remuneration_FD, color = Banque)) +
+  geom_line() +
+  labs(title = "Rémunération quotidienne FD des banques françaises", y = "Rémunération (€)", x = "Date")
+
+ggplot(taux_bce, aes(x = DateEffet, y = tauxBCE)) +
+  geom_line() +
+  labs(title = "Taux de base sur les facilités de dépôt", y = "Taux BCE (%)", x = "Date")
+
+write.csv(fd, "base_finale.csv", row.names = FALSE)

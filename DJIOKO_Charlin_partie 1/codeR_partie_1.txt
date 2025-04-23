@@ -1,0 +1,228 @@
+######## Préparation de l’environnement#################
+
+
+# Charger les packages nécessaires
+
+library(dplyr)
+library(lubridate)
+library(urca)
+library(tseries)
+library(nortest)
+library(lmtest)
+library(FinTS)
+library(strucchange)
+library(dLagM)
+
+
+#################### Importation des données et exploration##########################
+
+######### Solde TARGET
+
+t2 = read.csv("T2.csv")
+colnames(t2)[3]<-"TARGET"
+
+t2$DATE <- as.Date(t2$DATE)
+
+# Extraire le mois de chaque date
+t2$mois <- month(t2$DATE)
+
+# garder uniquement les données à la fin de chaque trimestre
+t2_trim <- t2 %>%
+  filter(mois %in% c(3, 6, 9, 12)) %>%
+  arrange(DATE) %>%
+  filter(DATE >= as.Date("2015-01-01") & DATE <= as.Date("2025-01-01"))
+
+head(t2_trim)
+
+# Convertir les données en time series
+TARGET2 <- ts(t2_trim$TARGET, 
+                 start = c(2015, 1),
+                 frequency = 4)      
+
+########## Transactions courantes
+
+CA = read.csv("CA_FR.csv",sep = ";",dec = ",")
+CA <- CA%>%
+  mutate(date = as.Date(time_period_start)) %>%
+  arrange(date) %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2025-01-01"))
+
+CA <- ts(CA$obs_value, 
+                 start = c(2015, 1),
+                 frequency = 4)      
+
+
+########## Investissements
+
+invest = read.csv("invest.csv",sep = ";",dec = ",")
+invest <- invest%>%
+  mutate(date = as.Date(time_period_start)) %>%
+  arrange(date) %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2025-01-01"))
+
+FDI <- ts(invest$obs_value, 
+                 start = c(2015, 1),
+                 frequency = 4)      
+
+
+########## Autres investissements
+
+autreInvest = read.csv("autreInvest_net.csv",sep = ";",dec = ",")
+autreInvest <- autreInvest %>%
+  mutate(date = as.Date(time_period_start)) %>%
+  arrange(date) %>%
+  filter(date >= as.Date("2015-01-01") & date <= as.Date("2025-01-01"))
+  
+
+AINV  <- ts(autreInvest$obs_value, 
+                 start = c(2015, 1),
+                 frequency = 4)      
+
+
+############ courbe des 4 chroniques
+
+par(mfrow = c(2,2))
+plot(TARGET2, main = "Solde TARGET2", ylab = "Millions d'euros", col = "blue")
+plot(CA, main = "Solde des Transactions courantes", ylab = "Millions d'euros")
+plot(FDI, main = "Solde des investissements directs", ylab = "Millions d'euros")
+plot(AINV , main = "Solde des autres investissements", ylab = "Millions d'euros")
+
+
+
+####################### Etude de la Stationnarité#####################################
+
+par(mfrow = c(2,2))
+acf(TARGET2)
+acf(CA)
+acf(FDI)
+acf(AINV )
+
+
+##~######### Target2
+
+#summary(ur.df(TARGET2, type = "none", selectlags = "AIC"))
+
+D_TARGET2 = diff(TARGET2)
+summary(ur.df(D_TARGET2, type = "trend", selectlags = "AIC"))
+
+#La série différenciée est stationnaire au seuil de 5% . On peut conclure que TARGET2 est I(1)
+
+#########~## transactions courantes
+
+
+#summary(ur.df(CA, type = "none", selectlags = "AIC"))
+D_CA = diff(CA)
+summary(ur.df(D_CA, type = "trend", selectlags = "AIC"))
+
+#La série différenciée est stationnaire au seuil de 5% . On peut conclure que CA est I(1)
+
+################ Investissements nets
+
+
+summary(ur.df(FDI, type = "trend", selectlags = "AIC"))
+
+#La série est stationnaire au seuil de 5% . On peut conclure que FDI est I(0)
+
+################# Autre investissements
+
+summary(ur.df(AINV , type = "trend", selectlags = "AIC"))
+
+#La série est stationnaire au seuil de 5% . On peut conclure que FDI est I(0)
+
+################# flux financier : FDI+AINV
+
+INV = FDI+AINV
+summary(ur.df(INV , type = "trend", selectlags = "BIC"))
+
+#Les chroniques étudiées sont générées par des processus I(0) ou I(1)
+
+################################ Modélisation ARDL  ###########################################""
+################# Ordre optimal
+
+library(ARDL)
+donnees.ardl=as.data.frame(cbind(TARGET2,CA,FDI,AINV,INV ))
+ordre.optimal=auto_ardl(TARGET2~CA+INV
+                        ,data = donnees.ardl,max_order=4,selection = "BIC")
+head(ordre.optimal)
+
+#Le choix d modele général vise à repecter le principe de parcimonie. On choisit de retenir le modele ARDL c(2,4,3)
+
+################## Estimation
+
+ardl_modele = ordre.optimal$best_model
+summary(ardl_modele)
+
+
+################## Validation
+######## nullité
+
+residus=ardl.MCE$residuals
+t.test(residus,alternative="two.sided",mu=0)
+wilcox.test(residus)
+
+
+layout((matrix(1:4,ncol=2)))
+plot(ardl.MCE)
+
+######## hétéroscédasticité 
+
+ArchTest(residus,lags=4,demean = F)
+bptest(ardl.MCE)
+
+######## Indépendance
+
+
+Box.test(residus,lag=4,type="Box-Pierce") #plusieurs lag testés et tous confirme l'indépendance
+Box.test(residus,lag=4,type = "Ljung-Box")
+
+######## Normalité
+
+lillie.test(residus)
+
+jarque.bera.test(residus)
+
+shapiro.test(residus)
+
+######## Stabilité des coefficients
+
+res.stru=efp(ardl_modele,data=donnees.ardl,type = "OLS-CUSUM")
+plot(res.stru,main="CUSUM test sur la stabilité du modèle",lwd=1,col="blue")
+sctest(res.stru)
+
+#Les données soutiennent avec suffisamment d'évidence que les erreurs d modèle sont bruit blanc. Aussi elles permettent d'affirmer avec beaucoup d'évidence que le modèle est stable
+
+##########################" Vérification d'une relation de coïntégration avec le test de Pesaran et coll###############################"
+
+pesaran=ardlBound(data=donnees.ardl,formula =ardl_modele$full_formula,case=2,max.p = 10,max.q = 10)
+
+summary(pesaran)
+
+#Le test de PESARAN et coll(2001) indique au niveau de signification a=5% l'absence d'une relation de cointégration entre les processus générateur : la sttistique de test F-stat = 0.6 < borne inférieure = 3.4
+
+
+######################### Etimation de la relation de CT #########################################""
+
+
+modele.recm=recm(ardl_modele,case=2)
+summary(modele.recm)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
